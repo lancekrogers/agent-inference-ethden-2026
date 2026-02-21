@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/hcs"
@@ -44,8 +45,8 @@ type Agent struct {
 	handler *hcs.Handler
 
 	startTime      time.Time
-	completedTasks int
-	failedTasks    int
+	completedTasks atomic.Int64
+	failedTasks    atomic.Int64
 }
 
 // New creates an Agent with all required dependencies.
@@ -89,15 +90,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			a.log.Info("shutting down inference agent",
-				"completed", a.completedTasks,
-				"failed", a.failedTasks,
+				"completed", a.completedTasks.Load(),
+				"failed", a.failedTasks.Load(),
 				"uptime", time.Since(a.startTime))
 			return ctx.Err()
 		case task := <-a.handler.Tasks():
 			if err := a.processTask(ctx, task); err != nil {
 				a.log.Error("task processing failed", "task_id", task.TaskID, "error", err)
 				a.reportFailure(ctx, task, err)
-				a.failedTasks++
+				a.failedTasks.Add(1)
 			}
 		}
 	}
@@ -184,7 +185,7 @@ func (a *Agent) processTask(ctx context.Context, task hcs.TaskAssignment) error 
 		return fmt.Errorf("agent: result publish failed for task %s: %w", task.TaskID, err)
 	}
 
-	a.completedTasks++
+	a.completedTasks.Add(1)
 	a.log.Info("task completed", "task_id", task.TaskID, "duration", duration)
 	return nil
 }
@@ -210,8 +211,8 @@ func (a *Agent) healthLoop(ctx context.Context) {
 				AgentID:        a.cfg.AgentID,
 				Status:         "idle",
 				UptimeSeconds:  int64(time.Since(a.startTime).Seconds()),
-				CompletedTasks: a.completedTasks,
-				FailedTasks:    a.failedTasks,
+				CompletedTasks: int(a.completedTasks.Load()),
+				FailedTasks:    int(a.failedTasks.Load()),
 			})
 		}
 	}

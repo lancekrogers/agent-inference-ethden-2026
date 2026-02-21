@@ -133,8 +133,8 @@ func TestProcessTask_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if a.completedTasks != 1 {
-		t.Errorf("expected 1 completed task, got %d", a.completedTasks)
+	if a.completedTasks.Load() != 1 {
+		t.Errorf("expected 1 completed task, got %d", a.completedTasks.Load())
 	}
 	// Verify result was published (2 audit + 1 result = at least 1 published)
 	if len(mt.published) < 1 {
@@ -245,8 +245,8 @@ func TestRun_ReceivesAndProcesses(t *testing.T) {
 	if err != nil && err != context.Canceled {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if a.completedTasks != 1 {
-		t.Errorf("expected 1 completed task, got %d", a.completedTasks)
+	if a.completedTasks.Load() != 1 {
+		t.Errorf("expected 1 completed task, got %d", a.completedTasks.Load())
 	}
 }
 
