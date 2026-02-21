@@ -7,10 +7,8 @@ toolchain go1.24.4
 require (
 	github.com/ethereum/go-ethereum v1.17.0
 	github.com/hiero-ledger/hiero-sdk-go/v2 v2.75.0
-	github.com/lancekrogers/agent-coordinator-ethden-2026 v0.0.0
+	github.com/lancekrogers/agent-coordinator-ethden-2026 v0.0.0-20260221224746-0059b418ef82
 )
-
-replace github.com/lancekrogers/agent-coordinator-ethden-2026 => ../agent-coordinator
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
