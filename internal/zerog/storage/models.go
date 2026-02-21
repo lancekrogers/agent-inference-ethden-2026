@@ -15,56 +15,40 @@ var (
 
 // Metadata describes a stored item on 0G Storage.
 type Metadata struct {
-	// ContentID is the content-addressed identifier for retrieval.
-	ContentID string `json:"content_id"`
-
-	// Name is the human-readable name for the data.
-	Name string `json:"name"`
-
-	// Size is the data size in bytes.
-	Size int64 `json:"size"`
-
-	// ContentType is the MIME type of the stored data.
-	ContentType string `json:"content_type,omitempty"`
-
-	// CreatedAt is when the data was stored.
-	CreatedAt time.Time `json:"created_at"`
-
-	// Tags holds arbitrary key-value metadata.
-	Tags map[string]string `json:"tags,omitempty"`
+	ContentID   string            `json:"content_id"`
+	Name        string            `json:"name"`
+	Size        int64             `json:"size"`
+	ContentType string            `json:"content_type,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	Tags        map[string]string `json:"tags,omitempty"`
 }
 
 // ClientConfig holds configuration for the 0G Storage client.
 type ClientConfig struct {
-	// Endpoint is the 0G Storage indexer/node URL.
-	// Testnet: https://indexer-storage-testnet-turbo.0g.ai
-	Endpoint string
-
-	// DefaultChunkSize is the default chunk size for uploads (bytes).
-	// Defaults to 4MB if zero.
+	// ChainRPC is the 0G Chain JSON-RPC endpoint for Flow contract interaction.
+	ChainRPC string
+	// ChainID is the chain identifier (Galileo: 16602).
+	ChainID int64
+	// FlowContractAddress is the Flow contract on 0G Chain.
+	// Galileo default: 0x22E03a6A89B950F1c82ec5e74F8eCa321a105296
+	FlowContractAddress string
+	// PrivateKey is the hex-encoded private key for signing.
+	PrivateKey string
+	// StorageNodeEndpoint is the HTTP URL for the 0G Storage indexer/node.
+	StorageNodeEndpoint string
+	// DefaultChunkSize is the chunk size for uploads (bytes). Defaults to 4MB.
 	DefaultChunkSize int64
-
 	// MaxRetries is the number of retry attempts for failed operations.
 	MaxRetries int
+
+	// Endpoint is a legacy field for backward compat with REST mode.
+	// If StorageNodeEndpoint is empty, falls back to Endpoint.
+	Endpoint string
 }
 
-// uploadRequest is the JSON payload for an upload to 0G Storage.
-type uploadRequest struct {
-	Data        string            `json:"data"`
-	Name        string            `json:"name"`
-	ContentType string            `json:"content_type,omitempty"`
-	Tags        map[string]string `json:"tags,omitempty"`
-	ChunkIndex  int               `json:"chunk_index,omitempty"`
-	TotalChunks int               `json:"total_chunks,omitempty"`
-}
-
-// uploadResponse is the JSON response from a successful upload.
-type uploadResponse struct {
-	ContentID string `json:"content_id"`
-	Size      int64  `json:"size"`
-}
-
-// listResponse is the JSON response from a list query.
-type listResponse struct {
-	Items []Metadata `json:"items"`
+func (c *ClientConfig) storageEndpoint() string {
+	if c.StorageNodeEndpoint != "" {
+		return c.StorageNodeEndpoint
+	}
+	return c.Endpoint
 }

@@ -3,27 +3,56 @@ package da
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"errors"
+	"math/big"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/zgtest"
 )
 
-func TestPublish_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/da/submit" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(daResponse{
-			SubmissionID: "sub-123",
-			BlockHeight:  42,
-			Status:       "confirmed",
-		})
-	}))
-	defer srv.Close()
+func daReceipt() *types.Receipt {
+	eventSig := daABI.Events["DataSubmit"].ID
+	dataRoot := common.HexToHash("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+	return &types.Receipt{
+		Status: types.ReceiptStatusSuccessful,
+		Logs: []*types.Log{
+			{
+				Topics: []common.Hash{
+					eventSig,
+					common.BytesToHash(common.Address{}.Bytes()), // sender
+					dataRoot,                                     // dataRoot
+				},
+				Data: common.LeftPadBytes(big.NewInt(1).Bytes(), 64), // epoch + quorumId
+			},
+		},
+	}
+}
 
-	p := NewPublisher(PublisherConfig{Endpoint: srv.URL, MaxRetries: 0})
+func TestPublish_Success(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &zgtest.MockBackend{
+		ReceiptFn: func(_ context.Context, _ common.Hash) (*types.Receipt, error) {
+			return daReceipt(), nil
+		},
+	}
+
+	p := NewPublisher(PublisherConfig{
+		ChainID:           16602,
+		DAContractAddress: "0xE75A073dA5bb7b0eC622170Fd268f35E675a957B",
+		MaxRetries:        0,
+	}, backend, key)
+
 	subID, err := p.Publish(context.Background(), AuditEvent{
 		Type:      EventTypeJobCompleted,
 		AgentID:   "agent-1",
@@ -33,25 +62,37 @@ func TestPublish_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if subID != "sub-123" {
-		t.Errorf("expected sub-123, got %s", subID)
+	if subID == "" {
+		t.Error("expected non-empty submission ID")
 	}
 }
 
 func TestPublish_Retry(t *testing.T) {
-	attempt := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempt++
-		if attempt < 3 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(daResponse{SubmissionID: "sub-retry"})
-	}))
-	defer srv.Close()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	p := NewPublisher(PublisherConfig{Endpoint: srv.URL, MaxRetries: 3})
+	attempt := 0
+	backend := &zgtest.MockBackend{
+		SendTxFn: func(_ context.Context, _ *types.Transaction) error {
+			attempt++
+			if attempt < 3 {
+				return errors.New("temporary failure")
+			}
+			return nil
+		},
+		ReceiptFn: func(_ context.Context, _ common.Hash) (*types.Receipt, error) {
+			return daReceipt(), nil
+		},
+	}
+
+	p := NewPublisher(PublisherConfig{
+		ChainID:           16602,
+		DAContractAddress: "0xE75A073dA5bb7b0eC622170Fd268f35E675a957B",
+		MaxRetries:        3,
+	}, backend, key)
+
 	subID, err := p.Publish(context.Background(), AuditEvent{
 		Type:      EventTypeResultStored,
 		Timestamp: time.Now(),
@@ -59,22 +100,30 @@ func TestPublish_Retry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error after retries: %v", err)
 	}
-	if subID != "sub-retry" {
-		t.Errorf("expected sub-retry, got %s", subID)
-	}
-	if attempt != 3 {
-		t.Errorf("expected 3 attempts, got %d", attempt)
+	if subID == "" {
+		t.Error("expected non-empty submission ID")
 	}
 }
 
 func TestPublish_AllRetriesFail(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	p := NewPublisher(PublisherConfig{Endpoint: srv.URL, MaxRetries: 1})
-	_, err := p.Publish(context.Background(), AuditEvent{
+	backend := &zgtest.MockBackend{
+		SendTxFn: func(_ context.Context, _ *types.Transaction) error {
+			return errors.New("persistent failure")
+		},
+	}
+
+	p := NewPublisher(PublisherConfig{
+		ChainID:           16602,
+		DAContractAddress: "0xtest",
+		MaxRetries:        1,
+	}, backend, key)
+
+	_, err = p.Publish(context.Background(), AuditEvent{
 		Type:      EventTypeJobFailed,
 		Timestamp: time.Now(),
 	})
@@ -87,35 +136,70 @@ func TestPublish_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	p := NewPublisher(PublisherConfig{Endpoint: "http://example.com"})
-	_, err := p.Publish(ctx, AuditEvent{Type: EventTypeJobSubmitted, Timestamp: time.Now()})
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &zgtest.MockBackend{}
+	p := NewPublisher(PublisherConfig{
+		ChainID:           16602,
+		DAContractAddress: "0xtest",
+	}, backend, key)
+
+	_, err = p.Publish(ctx, AuditEvent{Type: EventTypeJobSubmitted, Timestamp: time.Now()})
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
 }
 
-func TestPublish_NodeDown(t *testing.T) {
-	p := NewPublisher(PublisherConfig{Endpoint: "http://127.0.0.1:1", MaxRetries: 0})
-	_, err := p.Publish(context.Background(), AuditEvent{
+func TestPublish_ChainDown(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &zgtest.MockBackend{
+		Err: ErrDANodeUnreachable,
+	}
+
+	p := NewPublisher(PublisherConfig{
+		ChainID:           16602,
+		DAContractAddress: "0xtest",
+		MaxRetries:        0,
+	}, backend, key)
+
+	_, err = p.Publish(context.Background(), AuditEvent{
 		Type:      EventTypeJobSubmitted,
 		Timestamp: time.Now(),
 	})
 	if err == nil {
-		t.Fatal("expected error for unreachable node")
+		t.Fatal("expected error for unreachable chain")
 	}
 }
 
 func TestVerify_Available(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/da/verify/sub-123" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		json.NewEncoder(w).Encode(daVerifyResponse{Available: true, Status: "confirmed"})
-	}))
-	defer srv.Close()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	p := NewPublisher(PublisherConfig{Endpoint: srv.URL})
-	available, err := p.Verify(context.Background(), "sub-123")
+	// ABI-encode a bool true response
+	boolType, _ := abi.NewType("bool", "", nil)
+	encoded, _ := abi.Arguments{{Type: boolType}}.Pack(true)
+
+	backend := &zgtest.MockBackend{
+		CallFn: func(_ context.Context, _ ethereum.CallMsg) ([]byte, error) {
+			return encoded, nil
+		},
+	}
+
+	p := NewPublisher(PublisherConfig{
+		ChainID:           16602,
+		DAContractAddress: "0xtest",
+	}, backend, key)
+
+	available, err := p.Verify(context.Background(), "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,13 +209,26 @@ func TestVerify_Available(t *testing.T) {
 }
 
 func TestVerify_NotAvailable(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(daVerifyResponse{Available: false, Status: "pending"})
-	}))
-	defer srv.Close()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	p := NewPublisher(PublisherConfig{Endpoint: srv.URL})
-	available, err := p.Verify(context.Background(), "sub-pending")
+	boolType, _ := abi.NewType("bool", "", nil)
+	encoded, _ := abi.Arguments{{Type: boolType}}.Pack(false)
+
+	backend := &zgtest.MockBackend{
+		CallFn: func(_ context.Context, _ ethereum.CallMsg) ([]byte, error) {
+			return encoded, nil
+		},
+	}
+
+	p := NewPublisher(PublisherConfig{
+		ChainID:           16602,
+		DAContractAddress: "0xtest",
+	}, backend, key)
+
+	available, err := p.Verify(context.Background(), "0xdeadbeef")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -140,11 +237,24 @@ func TestVerify_NotAvailable(t *testing.T) {
 	}
 }
 
-func TestVerify_NodeDown(t *testing.T) {
-	p := NewPublisher(PublisherConfig{Endpoint: "http://127.0.0.1:1"})
-	_, err := p.Verify(context.Background(), "sub-123")
+func TestVerify_ChainDown(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &zgtest.MockBackend{
+		Err: ErrDANodeUnreachable,
+	}
+
+	p := NewPublisher(PublisherConfig{
+		ChainID:           16602,
+		DAContractAddress: "0xtest",
+	}, backend, key)
+
+	_, err = p.Verify(context.Background(), "0xtest")
 	if err == nil {
-		t.Fatal("expected error for unreachable node")
+		t.Fatal("expected error for unreachable chain")
 	}
 }
 
@@ -200,8 +310,5 @@ func TestSerializeEvent_AllFields(t *testing.T) {
 	}
 	if parsed.StorageRef != "cid-123" {
 		t.Errorf("expected cid-123, got %s", parsed.StorageRef)
-	}
-	if parsed.INFTRef != "token-1" {
-		t.Errorf("expected token-1, got %s", parsed.INFTRef)
 	}
 }

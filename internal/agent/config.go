@@ -15,31 +15,14 @@ import (
 
 // Config holds all configuration for the inference agent.
 type Config struct {
-	// AgentID is the unique identifier for this agent instance.
-	AgentID string
-
-	// DaemonAddr is the address of the daemon client for registration.
-	DaemonAddr string
-
-	// HealthInterval is how often to send heartbeat messages.
+	AgentID        string
+	DaemonAddr     string
 	HealthInterval time.Duration
-
-	// Compute holds 0G Compute broker configuration.
-	Compute compute.BrokerConfig
-
-	// Storage holds 0G Storage client configuration.
-	Storage storage.ClientConfig
-
-	// INFT holds 0G Chain iNFT minter configuration.
-	INFT inft.MinterConfig
-
-	// DA holds 0G DA publisher configuration.
-	DA da.PublisherConfig
-
-	// HCSTaskTopic is the HCS topic for task assignments.
-	HCSTaskTopic string
-
-	// HCSResultTopic is the HCS topic for results.
+	Compute        compute.BrokerConfig
+	Storage        storage.ClientConfig
+	INFT           inft.MinterConfig
+	DA             da.PublisherConfig
+	HCSTaskTopic   string
 	HCSResultTopic string
 }
 
@@ -75,19 +58,32 @@ func LoadConfig() (*Config, error) {
 		cfg.HealthInterval = dur
 	}
 
+	chainRPC := envOr("ZG_CHAIN_RPC", "https://evmrpc-testnet.0g.ai")
+	chainPrivKey := os.Getenv("ZG_CHAIN_PRIVATE_KEY")
+	var chainID int64 = 16602
+
 	// 0G Compute
+	cfg.Compute.ChainRPC = chainRPC
+	cfg.Compute.ChainID = chainID
+	cfg.Compute.PrivateKey = chainPrivKey
+	cfg.Compute.ServingContractAddress = os.Getenv("ZG_SERVING_CONTRACT")
 	cfg.Compute.Endpoint = os.Getenv("ZG_COMPUTE_ENDPOINT")
 	cfg.Compute.PollInterval = 2 * time.Second
 	cfg.Compute.PollTimeout = 5 * time.Minute
 
 	// 0G Storage
+	cfg.Storage.ChainRPC = chainRPC
+	cfg.Storage.ChainID = chainID
+	cfg.Storage.PrivateKey = chainPrivKey
+	cfg.Storage.FlowContractAddress = envOr("ZG_FLOW_CONTRACT", "0x22E03a6A89B950F1c82ec5e74F8eCa321a105296")
+	cfg.Storage.StorageNodeEndpoint = os.Getenv("ZG_STORAGE_NODE_ENDPOINT")
 	cfg.Storage.Endpoint = os.Getenv("ZG_STORAGE_ENDPOINT")
 
 	// 0G iNFT
-	cfg.INFT.ChainRPC = envOr("ZG_CHAIN_RPC", "https://evmrpc-testnet.0g.ai")
-	cfg.INFT.ChainID = 16602
+	cfg.INFT.ChainRPC = chainRPC
+	cfg.INFT.ChainID = chainID
 	cfg.INFT.ContractAddress = os.Getenv("ZG_INFT_CONTRACT")
-	cfg.INFT.PrivateKey = os.Getenv("ZG_CHAIN_PRIVATE_KEY")
+	cfg.INFT.PrivateKey = chainPrivKey
 	cfg.INFT.EncryptionKeyID = envOr("ZG_ENCRYPTION_KEY_ID", "default")
 
 	encKeyHex := os.Getenv("ZG_ENCRYPTION_KEY")
@@ -100,8 +96,12 @@ func LoadConfig() (*Config, error) {
 	}
 
 	// 0G DA
-	cfg.DA.Endpoint = os.Getenv("ZG_DA_ENDPOINT")
+	cfg.DA.ChainRPC = chainRPC
+	cfg.DA.ChainID = chainID
+	cfg.DA.PrivateKey = chainPrivKey
+	cfg.DA.DAContractAddress = envOr("ZG_DA_CONTRACT", "0xE75A073dA5bb7b0eC622170Fd268f35E675a957B")
 	cfg.DA.Namespace = envOr("ZG_DA_NAMESPACE", "inference-audit")
+	cfg.DA.Endpoint = os.Getenv("ZG_DA_ENDPOINT")
 
 	// HCS
 	cfg.HCSTaskTopic = os.Getenv("HCS_TASK_TOPIC")

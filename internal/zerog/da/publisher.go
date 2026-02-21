@@ -1,64 +1,101 @@
 // Package da integrates with 0G Data Availability for publishing
 // inference audit trails.
 //
-// 0G DA provides a data availability layer where blobs are submitted to
-// DA nodes and confirmed on-chain. A Go client exists at
-// github.com/0glabs/0g-da-client for low-level operations.
-//
-// This package uses the REST API exposed by the DA indexer for simpler
-// CRUD operations suitable for audit trail publishing.
-//
-// Architecture:
-//
-//	Agent → DA Indexer REST API → 0G DA Nodes → On-chain DA Entrance Contract
-//
+// Uses go-ethereum to interact with the DA Entrance contract on 0G Chain.
 // Testnet DA entrance: 0xE75A073dA5bb7b0eC622170Fd268f35E675a957B (Galileo)
 package da
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+
+	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog"
 )
+
+const daABIJSON = `[
+  {
+    "name": "submitOriginalData",
+    "type": "function",
+    "inputs": [
+      {"name": "data", "type": "bytes"}
+    ],
+    "outputs": []
+  },
+  {
+    "name": "DataSubmit",
+    "type": "event",
+    "inputs": [
+      {"name": "sender", "type": "address", "indexed": true},
+      {"name": "dataRoot", "type": "bytes32", "indexed": true},
+      {"name": "epoch", "type": "uint256", "indexed": false},
+      {"name": "quorumId", "type": "uint256", "indexed": false}
+    ]
+  },
+  {
+    "name": "isDataAvailable",
+    "type": "function",
+    "stateMutability": "view",
+    "inputs": [
+      {"name": "dataRoot", "type": "bytes32"}
+    ],
+    "outputs": [
+      {"name": "available", "type": "bool"}
+    ]
+  }
+]`
+
+var daABI = mustParseABI(daABIJSON)
+
+func mustParseABI(raw string) abi.ABI {
+	parsed, err := abi.JSON(strings.NewReader(raw))
+	if err != nil {
+		panic("da: invalid ABI: " + err.Error())
+	}
+	return parsed
+}
 
 // AuditPublisher posts inference audit events to 0G Data Availability.
 type AuditPublisher interface {
-	// Publish submits an audit event to the 0G DA layer.
-	// Returns a submission ID for verification.
 	Publish(ctx context.Context, event AuditEvent) (string, error)
-
-	// Verify confirms that a previously published audit event is available.
 	Verify(ctx context.Context, submissionID string) (bool, error)
 }
 
-// publisher implements AuditPublisher using the 0G DA REST API.
 type publisher struct {
-	cfg    PublisherConfig
-	client *http.Client
+	cfg      PublisherConfig
+	backend  zerog.ChainBackend
+	contract *bind.BoundContract
+	key      *ecdsa.PrivateKey
 }
 
-// NewPublisher creates a new AuditPublisher connected to 0G DA.
-func NewPublisher(cfg PublisherConfig) AuditPublisher {
+// NewPublisher creates a new AuditPublisher using the DA Entrance contract.
+func NewPublisher(cfg PublisherConfig, backend zerog.ChainBackend, key *ecdsa.PrivateKey) AuditPublisher {
 	if cfg.MaxRetries == 0 {
 		cfg.MaxRetries = 3
 	}
 	if cfg.Namespace == "" {
 		cfg.Namespace = "inference-audit"
 	}
+
+	contractAddr := common.HexToAddress(cfg.DAContractAddress)
+	bc := bind.NewBoundContract(contractAddr, daABI, backend, backend, backend)
+
 	return &publisher{
-		cfg: cfg,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		cfg:      cfg,
+		backend:  backend,
+		contract: bc,
+		key:      key,
 	}
 }
 
-// Publish serializes an audit event and submits it to 0G DA with retry logic.
 func (p *publisher) Publish(ctx context.Context, event AuditEvent) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("da: context cancelled before publish: %w", err)
@@ -66,53 +103,42 @@ func (p *publisher) Publish(ctx context.Context, event AuditEvent) (string, erro
 
 	data, err := serializeEvent(event)
 	if err != nil {
-		return "", fmt.Errorf("da: failed to serialize event %s: %w", event.Type, err)
+		return "", fmt.Errorf("da: serialize event %s: %w", event.Type, err)
 	}
 
-	sub, err := p.publishWithRetry(ctx, data)
+	subID, err := p.publishWithRetry(ctx, data)
 	if err != nil {
-		return "", fmt.Errorf("da: failed to publish event %s: %w", event.Type, err)
+		return "", fmt.Errorf("da: publish event %s: %w", event.Type, err)
 	}
 
-	return sub.ID, nil
+	return subID, nil
 }
 
-// Verify checks whether a previously submitted event is available on DA.
 func (p *publisher) Verify(ctx context.Context, submissionID string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, fmt.Errorf("da: context cancelled before verify: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("%s/api/da/verify/%s", p.cfg.Endpoint, submissionID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	dataRoot := common.HexToHash(submissionID)
+
+	var results []interface{}
+	err := p.contract.Call(&bind.CallOpts{Context: ctx}, &results, "isDataAvailable", dataRoot)
 	if err != nil {
-		return false, fmt.Errorf("da: failed to create verify request: %w", err)
+		return false, fmt.Errorf("da: verify call for %s: %w", submissionID, err)
 	}
 
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("da: verify request failed: %w", ErrDANodeUnreachable)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false, fmt.Errorf("da: failed to read verify response: %w", err)
+	if len(results) == 0 {
+		return false, nil
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("da: verify returned status %d: %s", resp.StatusCode, string(body))
+	available, ok := results[0].(bool)
+	if !ok {
+		return false, fmt.Errorf("da: unexpected verify result type")
 	}
 
-	var verifyResp daVerifyResponse
-	if err := json.Unmarshal(body, &verifyResp); err != nil {
-		return false, fmt.Errorf("da: failed to parse verify response: %w", err)
-	}
-
-	return verifyResp.Available, nil
+	return available, nil
 }
 
-// serializeEvent produces deterministic JSON bytes for an audit event.
 func serializeEvent(event AuditEvent) ([]byte, error) {
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -121,16 +147,16 @@ func serializeEvent(event AuditEvent) ([]byte, error) {
 	return data, nil
 }
 
-func (p *publisher) publishWithRetry(ctx context.Context, data []byte) (*Submission, error) {
+func (p *publisher) publishWithRetry(ctx context.Context, data []byte) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt <= p.cfg.MaxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("da: context cancelled on attempt %d: %w", attempt+1, err)
+			return "", fmt.Errorf("context cancelled on attempt %d: %w", attempt+1, err)
 		}
 
-		sub, err := p.submitToDA(ctx, data)
+		subID, err := p.submitToDA(ctx, data)
 		if err == nil {
-			return sub, nil
+			return subID, nil
 		}
 		lastErr = err
 
@@ -138,55 +164,49 @@ func (p *publisher) publishWithRetry(ctx context.Context, data []byte) (*Submiss
 			backoff := time.Duration(1<<uint(attempt)) * time.Second
 			select {
 			case <-ctx.Done():
-				return nil, fmt.Errorf("da: context cancelled during backoff: %w", ctx.Err())
+				return "", fmt.Errorf("context cancelled during backoff: %w", ctx.Err())
 			case <-time.After(backoff):
 			}
 		}
 	}
-	return nil, fmt.Errorf("da: all %d attempts failed: %w", p.cfg.MaxRetries+1, lastErr)
+	return "", fmt.Errorf("all %d attempts failed: %w", p.cfg.MaxRetries+1, lastErr)
 }
 
-func (p *publisher) submitToDA(ctx context.Context, data []byte) (*Submission, error) {
-	daReq := daRequest{
-		Data:      base64.StdEncoding.EncodeToString(data),
-		Namespace: p.cfg.Namespace,
-	}
-
-	body, err := json.Marshal(daReq)
+func (p *publisher) submitToDA(ctx context.Context, data []byte) (string, error) {
+	opts, err := zerog.MakeTransactOpts(ctx, p.key, p.cfg.ChainID)
 	if err != nil {
-		return nil, fmt.Errorf("da: failed to marshal DA request: %w", err)
+		return "", fmt.Errorf("create transact opts: %w", err)
 	}
 
-	endpoint := p.cfg.Endpoint + "/api/da/submit"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	tx, err := p.contract.Transact(opts, "submitOriginalData", data)
 	if err != nil {
-		return nil, fmt.Errorf("da: failed to create submit request: %w", err)
+		return "", fmt.Errorf("submit tx: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := p.client.Do(httpReq)
+	receipt, err := bind.WaitMined(ctx, p.backend, tx)
 	if err != nil {
-		return nil, fmt.Errorf("da: submit request failed: %w", ErrDANodeUnreachable)
+		return "", fmt.Errorf("wait for tx %s: %w", tx.Hash().Hex(), err)
 	}
-	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return "", fmt.Errorf("tx reverted: %w", ErrSubmissionFailed)
+	}
+
+	subID, err := parseDataSubmitEvent(receipt)
 	if err != nil {
-		return nil, fmt.Errorf("da: failed to read submit response: %w", err)
+		return "", err
 	}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("da: submit returned status %d: %s: %w", resp.StatusCode, string(respBody), ErrSubmissionFailed)
-	}
+	return subID, nil
+}
 
-	var daResp daResponse
-	if err := json.Unmarshal(respBody, &daResp); err != nil {
-		return nil, fmt.Errorf("da: failed to parse submit response: %w", err)
+func parseDataSubmitEvent(receipt *types.Receipt) (string, error) {
+	eventSig := daABI.Events["DataSubmit"].ID
+	for _, log := range receipt.Logs {
+		if len(log.Topics) >= 2 && log.Topics[0] == eventSig {
+			dataRoot := log.Topics[1]
+			return dataRoot.Hex(), nil
+		}
 	}
-
-	return &Submission{
-		ID:          daResp.SubmissionID,
-		BlockHeight: daResp.BlockHeight,
-		SubmittedAt: time.Now(),
-	}, nil
+	return "", fmt.Errorf("da: DataSubmit event not found in receipt")
 }

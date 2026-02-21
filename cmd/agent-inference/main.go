@@ -11,6 +11,7 @@ import (
 
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/agent"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/hcs"
+	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/compute"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/da"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/inft"
@@ -31,15 +32,27 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Initialize all dependencies
-	comp := compute.NewBroker(cfg.Compute)
-	store := storage.NewClient(cfg.Storage)
-	mint := inft.NewMinter(cfg.INFT)
-	aud := da.NewPublisher(cfg.DA)
+	// Connect to 0G Chain
+	chainClient, err := zerog.DialClient(ctx, cfg.INFT.ChainRPC)
+	if err != nil {
+		log.Error("failed to connect to 0G Chain", "error", err)
+		os.Exit(1)
+	}
+
+	// Load signing key
+	chainKey, err := zerog.LoadKey(cfg.INFT.PrivateKey)
+	if err != nil {
+		log.Error("failed to load chain private key", "error", err)
+		os.Exit(1)
+	}
+
+	// Initialize all dependencies with shared chain connection
+	comp := compute.NewBroker(cfg.Compute, chainClient, chainKey)
+	store := storage.NewClient(cfg.Storage, chainClient, chainKey)
+	mint := inft.NewMinter(cfg.INFT, chainClient, chainKey)
+	aud := da.NewPublisher(cfg.DA, chainClient, chainKey)
 
 	// HCS handler requires a transport implementation.
-	// For now, log a message if no transport is configured.
-	// In production, this would use the Hedera SDK transport.
 	var transport hcs.Transport
 	if transport == nil {
 		log.Warn("no HCS transport configured, using stub")
@@ -57,8 +70,7 @@ func main() {
 	log.Info("inference agent stopped gracefully")
 }
 
-// stubTransport is a no-op HCS transport for development when
-// no Hedera network is available.
+// stubTransport is a no-op HCS transport for development.
 type stubTransport struct{}
 
 func (s *stubTransport) Publish(_ context.Context, _ string, _ []byte) error {

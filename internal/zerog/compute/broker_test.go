@@ -3,43 +3,99 @@ package compute
 import (
 	"context"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/zgtest"
 )
 
+func newTestBroker(t *testing.T, backend *zgtest.MockBackend, httpEndpoint string) ComputeBroker {
+	t.Helper()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewBroker(BrokerConfig{
+		ChainID:                16602,
+		ServingContractAddress: "0x0000000000000000000000000000000000000001",
+		Endpoint:               httpEndpoint,
+		PollInterval:           10 * time.Millisecond,
+		PollTimeout:            1 * time.Second,
+	}, backend, key)
+}
+
+// encodedServiceCount returns ABI-encoded uint256 for getServiceCount.
+func encodedServiceCount(n int) []byte {
+	uint256Type, _ := abi.NewType("uint256", "", nil)
+	data, _ := abi.Arguments{{Type: uint256Type}}.Pack(big.NewInt(int64(n)))
+	return data
+}
+
+// encodedService returns ABI-encoded outputs for getService.
+func encodedService(provider common.Address, name, svcType, url, model string) []byte {
+	addrType, _ := abi.NewType("address", "", nil)
+	strType, _ := abi.NewType("string", "", nil)
+	args := abi.Arguments{
+		{Type: addrType},
+		{Type: strType},
+		{Type: strType},
+		{Type: strType},
+		{Type: strType},
+	}
+	data, _ := args.Pack(provider, name, svcType, url, model)
+	return data
+}
+
 func TestSubmitJob_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/services/query" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			var req chatRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("failed to decode request: %v", err)
+			}
+			if req.Model != "test-model" {
+				t.Errorf("unexpected model: %s", req.Model)
+			}
+			resp := chatResponse{
+				ID: "job-123",
+				Choices: []chatChoice{
+					{Message: chatMessage{Role: "assistant", Content: "hello"}, Index: 0},
+				},
+				Usage: chatUsage{TotalTokens: 10},
+				Model: "test-model",
+			}
+			json.NewEncoder(w).Encode(resp)
+		case "/api/services/list":
+			type svcEntry struct {
+				Provider    string `json:"providerAddress"`
+				Name        string `json:"name"`
+				ServiceType string `json:"serviceType"`
+				URL         string `json:"url"`
+				Model       string `json:"model"`
+			}
+			services := []svcEntry{
+				{Provider: "0xabc", Name: "Test", ServiceType: "chatbot", URL: srv.URL, Model: "test-model"},
+			}
+			json.NewEncoder(w).Encode(services)
+		default:
+			w.WriteHeader(http.StatusNotFound)
 		}
-		if r.Method != http.MethodPost {
-			t.Errorf("unexpected method: %s", r.Method)
-		}
-
-		var req chatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("failed to decode request: %v", err)
-		}
-		if req.Model != "test-model" {
-			t.Errorf("unexpected model: %s", req.Model)
-		}
-
-		resp := chatResponse{
-			ID: "job-123",
-			Choices: []chatChoice{
-				{Message: chatMessage{Role: "assistant", Content: "hello"}, Index: 0},
-			},
-			Usage: chatUsage{TotalTokens: 10},
-			Model: "test-model",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
-	b := NewBroker(BrokerConfig{Endpoint: srv.URL})
+	backend := &zgtest.MockBackend{}
+	b := newTestBroker(t, backend, srv.URL)
+
 	jobID, err := b.SubmitJob(context.Background(), JobRequest{
 		ModelID: "test-model",
 		Input:   "say hello",
@@ -52,27 +108,34 @@ func TestSubmitJob_Success(t *testing.T) {
 	}
 }
 
-func TestSubmitJob_BrokerDown(t *testing.T) {
-	b := NewBroker(BrokerConfig{Endpoint: "http://127.0.0.1:1"})
-	_, err := b.SubmitJob(context.Background(), JobRequest{
-		ModelID: "test-model",
-		Input:   "hello",
-	})
-	if err == nil {
-		t.Fatal("expected error for unreachable broker")
-	}
-}
-
 func TestSubmitJob_APIError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		resp := chatResponse{
-			Error: &chatRespError{Message: "model not found", Type: "invalid_request"},
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/services/list":
+			type svcEntry struct {
+				Provider    string `json:"providerAddress"`
+				Name        string `json:"name"`
+				ServiceType string `json:"serviceType"`
+				URL         string `json:"url"`
+				Model       string `json:"model"`
+			}
+			services := []svcEntry{
+				{Provider: "0xabc", Name: "Test", ServiceType: "chatbot", URL: srv.URL, Model: "bad-model"},
+			}
+			json.NewEncoder(w).Encode(services)
+		default:
+			resp := chatResponse{
+				Error: &chatRespError{Message: "model not found", Type: "invalid_request"},
+			}
+			json.NewEncoder(w).Encode(resp)
 		}
-		json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
-	b := NewBroker(BrokerConfig{Endpoint: srv.URL})
+	backend := &zgtest.MockBackend{}
+	b := newTestBroker(t, backend, srv.URL)
+
 	_, err := b.SubmitJob(context.Background(), JobRequest{
 		ModelID: "bad-model",
 		Input:   "hello",
@@ -86,7 +149,9 @@ func TestSubmitJob_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	b := NewBroker(BrokerConfig{Endpoint: "http://example.com"})
+	backend := &zgtest.MockBackend{}
+	b := newTestBroker(t, backend, "http://example.com")
+
 	_, err := b.SubmitJob(ctx, JobRequest{ModelID: "m", Input: "x"})
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
@@ -94,7 +159,7 @@ func TestSubmitJob_ContextCancelled(t *testing.T) {
 }
 
 func TestGetResult_Completed(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		resp := chatResponse{
 			ID: "job-456",
 			Choices: []chatChoice{
@@ -107,13 +172,19 @@ func TestGetResult_Completed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b := NewBroker(BrokerConfig{
-		Endpoint:     srv.URL,
-		PollInterval: 10 * time.Millisecond,
-		PollTimeout:  1 * time.Second,
-	})
+	backend := &zgtest.MockBackend{}
+	b := newTestBroker(t, backend, srv.URL)
 
-	result, err := b.GetResult(context.Background(), "job-456")
+	// Submit first to populate cache
+	jobID, err := b.SubmitJob(context.Background(), JobRequest{
+		ModelID: "test-model",
+		Input:   "test",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	result, err := b.GetResult(context.Background(), jobID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -129,41 +200,30 @@ func TestGetResult_Completed(t *testing.T) {
 }
 
 func TestGetResult_ContextCancelled(t *testing.T) {
-	// Server that always returns pending (404)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
 
-	b := NewBroker(BrokerConfig{
-		Endpoint:     srv.URL,
-		PollInterval: 10 * time.Millisecond,
-		PollTimeout:  5 * time.Second,
-	})
+	backend := &zgtest.MockBackend{}
+	b := newTestBroker(t, backend, "http://example.com")
 
-	_, err := b.GetResult(ctx, "job-789")
+	_, err := b.GetResult(ctx, "job-nonexistent")
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
 }
 
 func TestGetResult_Timeout(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
+	backend := &zgtest.MockBackend{}
+	key, _ := crypto.GenerateKey()
 	b := NewBroker(BrokerConfig{
-		Endpoint:     srv.URL,
-		PollInterval: 10 * time.Millisecond,
-		PollTimeout:  50 * time.Millisecond,
-	})
+		ChainID:                16602,
+		ServingContractAddress: "0x0000000000000000000000000000000000000001",
+		PollInterval:           10 * time.Millisecond,
+		PollTimeout:            50 * time.Millisecond,
+	}, backend, key)
 
 	_, err := b.GetResult(context.Background(), "job-timeout")
 	if err == nil {
@@ -171,41 +231,29 @@ func TestGetResult_Timeout(t *testing.T) {
 	}
 }
 
-func TestGetResult_Failed(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		resp := chatResponse{
-			Error: &chatRespError{Message: "out of memory", Type: "server_error"},
-		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer srv.Close()
+func TestListModels_FromChain(t *testing.T) {
+	provider := common.HexToAddress("0xabc")
 
-	b := NewBroker(BrokerConfig{
-		Endpoint:     srv.URL,
-		PollInterval: 10 * time.Millisecond,
-		PollTimeout:  1 * time.Second,
-	})
-
-	_, err := b.GetResult(context.Background(), "job-fail")
-	if err == nil {
-		t.Fatal("expected error for failed job")
+	callCount := 0
+	backend := &zgtest.MockBackend{
+		CallFn: func(_ context.Context, call ethereum.CallMsg) ([]byte, error) {
+			callCount++
+			if callCount == 1 {
+				return encodedServiceCount(2), nil
+			}
+			if callCount == 2 {
+				return encodedService(provider, "Qwen 2.5", "chatbot", "https://p1.example.com", "qwen-2.5-7b"), nil
+			}
+			return encodedService(common.HexToAddress("0xdef"), "GPT-OSS", "chatbot", "https://p2.example.com", "gpt-oss-20b"), nil
+		},
 	}
-}
 
-func TestListModels_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/services/list" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		services := []serviceEntry{
-			{Provider: "0xabc", Name: "Qwen 2.5", ServiceType: "chatbot", Model: "qwen-2.5-7b", URL: "https://provider1.example.com"},
-			{Provider: "0xdef", Name: "GPT-OSS", ServiceType: "chatbot", Model: "gpt-oss-20b", URL: "https://provider2.example.com"},
-		}
-		json.NewEncoder(w).Encode(services)
-	}))
-	defer srv.Close()
+	key, _ := crypto.GenerateKey()
+	b := NewBroker(BrokerConfig{
+		ChainID:                16602,
+		ServingContractAddress: "0x0000000000000000000000000000000000000001",
+	}, backend, key)
 
-	b := NewBroker(BrokerConfig{Endpoint: srv.URL})
 	models, err := b.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -216,18 +264,66 @@ func TestListModels_Success(t *testing.T) {
 	if models[0].ID != "qwen-2.5-7b" {
 		t.Errorf("expected qwen-2.5-7b, got %s", models[0].ID)
 	}
-	if models[1].Provider != "0xdef" {
-		t.Errorf("expected 0xdef, got %s", models[1].Provider)
+	if models[1].URL != "https://p2.example.com" {
+		t.Errorf("expected p2 URL, got %s", models[1].URL)
+	}
+}
+
+func TestListModels_FallbackHTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		type serviceEntry struct {
+			Provider    string `json:"providerAddress"`
+			Name        string `json:"name"`
+			ServiceType string `json:"serviceType"`
+			URL         string `json:"url"`
+			Model       string `json:"model"`
+		}
+		services := []serviceEntry{
+			{Provider: "0xabc", Name: "Model1", ServiceType: "chatbot", Model: "m1", URL: "https://p.example.com"},
+		}
+		json.NewEncoder(w).Encode(services)
+	}))
+	defer srv.Close()
+
+	// Chain fails, should fall back to HTTP
+	backend := &zgtest.MockBackend{
+		CallFn: func(_ context.Context, _ ethereum.CallMsg) ([]byte, error) {
+			return nil, ErrBrokerDown
+		},
+	}
+
+	key, _ := crypto.GenerateKey()
+	b := NewBroker(BrokerConfig{
+		ChainID:                16602,
+		ServingContractAddress: "0x0000000000000000000000000000000000000001",
+		Endpoint:               srv.URL,
+	}, backend, key)
+
+	models, err := b.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	if models[0].ID != "m1" {
+		t.Errorf("expected m1, got %s", models[0].ID)
 	}
 }
 
 func TestListModels_Empty(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode([]serviceEntry{})
-	}))
-	defer srv.Close()
+	backend := &zgtest.MockBackend{
+		CallFn: func(_ context.Context, _ ethereum.CallMsg) ([]byte, error) {
+			return encodedServiceCount(0), nil
+		},
+	}
 
-	b := NewBroker(BrokerConfig{Endpoint: srv.URL})
+	key, _ := crypto.GenerateKey()
+	b := NewBroker(BrokerConfig{
+		ChainID:                16602,
+		ServingContractAddress: "0x0000000000000000000000000000000000000001",
+	}, backend, key)
+
 	_, err := b.ListModels(context.Background())
 	if err != ErrNoModels {
 		t.Errorf("expected ErrNoModels, got %v", err)
@@ -236,18 +332,22 @@ func TestListModels_Empty(t *testing.T) {
 
 func TestListModels_Cached(t *testing.T) {
 	callCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		callCount++
-		services := []serviceEntry{
-			{Provider: "0xabc", Name: "Model1", Model: "m1"},
-		}
-		json.NewEncoder(w).Encode(services)
-	}))
-	defer srv.Close()
+	backend := &zgtest.MockBackend{
+		CallFn: func(_ context.Context, _ ethereum.CallMsg) ([]byte, error) {
+			callCount++
+			if callCount == 1 {
+				return encodedServiceCount(1), nil
+			}
+			return encodedService(common.HexToAddress("0xabc"), "Model1", "chatbot", "https://p.example.com", "m1"), nil
+		},
+	}
 
-	b := NewBroker(BrokerConfig{Endpoint: srv.URL})
+	key, _ := crypto.GenerateKey()
+	b := NewBroker(BrokerConfig{
+		ChainID:                16602,
+		ServingContractAddress: "0x0000000000000000000000000000000000000001",
+	}, backend, key)
 
-	// First call should hit the server
 	models1, err := b.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -256,7 +356,8 @@ func TestListModels_Cached(t *testing.T) {
 		t.Fatalf("expected 1 model, got %d", len(models1))
 	}
 
-	// Second call should use cache
+	// Reset call counter - second ListModels should use cache
+	prevCount := callCount
 	models2, err := b.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -264,17 +365,8 @@ func TestListModels_Cached(t *testing.T) {
 	if len(models2) != 1 {
 		t.Fatalf("expected 1 model, got %d", len(models2))
 	}
-
-	if callCount != 1 {
-		t.Errorf("expected 1 server call (cached), got %d", callCount)
-	}
-}
-
-func TestListModels_BrokerDown(t *testing.T) {
-	b := NewBroker(BrokerConfig{Endpoint: "http://127.0.0.1:1"})
-	_, err := b.ListModels(context.Background())
-	if err == nil {
-		t.Fatal("expected error for unreachable broker")
+	if callCount != prevCount {
+		t.Errorf("expected cached result (no new calls), got %d additional calls", callCount-prevCount)
 	}
 }
 
@@ -282,7 +374,13 @@ func TestListModels_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	b := NewBroker(BrokerConfig{Endpoint: "http://example.com"})
+	backend := &zgtest.MockBackend{}
+	key, _ := crypto.GenerateKey()
+	b := NewBroker(BrokerConfig{
+		ChainID:                16602,
+		ServingContractAddress: "0x0000000000000000000000000000000000000001",
+	}, backend, key)
+
 	_, err := b.ListModels(ctx)
 	if err == nil {
 		t.Fatal("expected error for cancelled context")

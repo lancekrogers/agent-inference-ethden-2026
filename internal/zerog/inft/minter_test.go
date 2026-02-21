@@ -2,55 +2,66 @@ package inft
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"math/big"
 	"testing"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/zgtest"
 )
 
-func testKey(t *testing.T) []byte {
+func testKey(t *testing.T) (*ecdsa.PrivateKey, []byte) {
 	t.Helper()
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
+	key, err := crypto.GenerateKey()
+	if err != nil {
 		t.Fatal(err)
 	}
-	return key
+	encKey := make([]byte, 32)
+	if _, err := rand.Read(encKey); err != nil {
+		t.Fatal(err)
+	}
+	return key, encKey
+}
+
+func mintReceipt(toAddr common.Address, tokenID int64) *types.Receipt {
+	transferSig := contractABI.Events["Transfer"].ID
+	return &types.Receipt{
+		Status: types.ReceiptStatusSuccessful,
+		Logs: []*types.Log{
+			{
+				Topics: []common.Hash{
+					transferSig,
+					common.BytesToHash(common.Address{}.Bytes()),
+					common.BytesToHash(toAddr.Bytes()),
+					common.BigToHash(big.NewInt(tokenID)),
+				},
+			},
+		},
+	}
 }
 
 func TestMint_Success(t *testing.T) {
-	callCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req rpcRequest
-		json.NewDecoder(r.Body).Decode(&req)
+	key, encKey := testKey(t)
+	addr := crypto.PubkeyToAddress(key.PublicKey)
 
-		callCount++
-		switch req.Method {
-		case "eth_sendTransaction":
-			json.NewEncoder(w).Encode(rpcResponse{
-				JSONRPC: "2.0",
-				Result:  json.RawMessage(`"0xabc123"`),
-				ID:      1,
-			})
-		case "eth_getTransactionReceipt":
-			json.NewEncoder(w).Encode(rpcResponse{
-				JSONRPC: "2.0",
-				Result:  json.RawMessage(`{"status": "0x1"}`),
-				ID:      1,
-			})
-		}
-	}))
-	defer srv.Close()
+	backend := &zgtest.MockBackend{
+		ReceiptFn: func(_ context.Context, _ common.Hash) (*types.Receipt, error) {
+			return mintReceipt(addr, 42), nil
+		},
+	}
 
-	key := testKey(t)
 	m := NewMinter(MinterConfig{
-		ChainRPC:        srv.URL,
 		ChainID:         16602,
-		ContractAddress: "0xtest",
-		PrivateKey:      "0xprivkey",
-		EncryptionKey:   key,
+		ContractAddress: "0x1234567890abcdef1234567890abcdef12345678",
+		EncryptionKey:   encKey,
 		EncryptionKeyID: "key-1",
-	})
+	}, backend, key)
 
 	tokenID, err := m.Mint(context.Background(), MintRequest{
 		Name:           "Test iNFT",
@@ -62,19 +73,24 @@ func TestMint_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if tokenID == "" {
-		t.Error("expected non-empty token ID")
+	if tokenID != "42" {
+		t.Errorf("expected token ID 42, got %s", tokenID)
 	}
 }
 
 func TestMint_ChainUnreachable(t *testing.T) {
-	key := testKey(t)
+	key, encKey := testKey(t)
+
+	backend := &zgtest.MockBackend{
+		Err: ErrChainUnreachable,
+	}
+
 	m := NewMinter(MinterConfig{
-		ChainRPC:        "http://127.0.0.1:1",
-		ContractAddress: "0xtest",
-		EncryptionKey:   key,
+		ChainID:         16602,
+		ContractAddress: "0x1234567890abcdef1234567890abcdef12345678",
+		EncryptionKey:   encKey,
 		EncryptionKeyID: "key-1",
-	})
+	}, backend, key)
 
 	_, err := m.Mint(context.Background(), MintRequest{
 		Name:          "Test",
@@ -85,30 +101,31 @@ func TestMint_ChainUnreachable(t *testing.T) {
 	}
 }
 
-func TestMint_InsufficientGas(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(rpcResponse{
-			JSONRPC: "2.0",
-			Error:   &rpcError{Code: -32000, Message: "insufficient funds"},
-			ID:      1,
-		})
-	}))
-	defer srv.Close()
+func TestMint_TxReverted(t *testing.T) {
+	key, encKey := testKey(t)
 
-	key := testKey(t)
+	backend := &zgtest.MockBackend{
+		ReceiptFn: func(_ context.Context, txHash common.Hash) (*types.Receipt, error) {
+			return &types.Receipt{
+				Status: types.ReceiptStatusFailed,
+				TxHash: txHash,
+			}, nil
+		},
+	}
+
 	m := NewMinter(MinterConfig{
-		ChainRPC:        srv.URL,
-		ContractAddress: "0xtest",
-		EncryptionKey:   key,
+		ChainID:         16602,
+		ContractAddress: "0x1234567890abcdef1234567890abcdef12345678",
+		EncryptionKey:   encKey,
 		EncryptionKeyID: "key-1",
-	})
+	}, backend, key)
 
 	_, err := m.Mint(context.Background(), MintRequest{
 		Name:          "Test",
 		PlaintextMeta: map[string]string{"k": "v"},
 	})
 	if err == nil {
-		t.Fatal("expected error for insufficient gas")
+		t.Fatal("expected error for reverted tx")
 	}
 }
 
@@ -116,13 +133,15 @@ func TestMint_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	key := testKey(t)
+	key, encKey := testKey(t)
+	backend := &zgtest.MockBackend{}
+
 	m := NewMinter(MinterConfig{
-		ChainRPC:        "http://example.com",
-		ContractAddress: "0xtest",
-		EncryptionKey:   key,
+		ChainID:         16602,
+		ContractAddress: "0x1234567890abcdef1234567890abcdef12345678",
+		EncryptionKey:   encKey,
 		EncryptionKeyID: "key-1",
-	})
+	}, backend, key)
 
 	_, err := m.Mint(ctx, MintRequest{
 		Name:          "Test",
@@ -134,33 +153,23 @@ func TestMint_ContextCancelled(t *testing.T) {
 }
 
 func TestUpdateMetadata_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req rpcRequest
-		json.NewDecoder(r.Body).Decode(&req)
+	key, _ := testKey(t)
 
-		switch req.Method {
-		case "eth_sendTransaction":
-			json.NewEncoder(w).Encode(rpcResponse{
-				JSONRPC: "2.0",
-				Result:  json.RawMessage(`"0xdef456"`),
-				ID:      1,
-			})
-		case "eth_getTransactionReceipt":
-			json.NewEncoder(w).Encode(rpcResponse{
-				JSONRPC: "2.0",
-				Result:  json.RawMessage(`{"status": "0x1"}`),
-				ID:      1,
-			})
-		}
-	}))
-	defer srv.Close()
+	backend := &zgtest.MockBackend{
+		ReceiptFn: func(_ context.Context, txHash common.Hash) (*types.Receipt, error) {
+			return &types.Receipt{
+				Status: types.ReceiptStatusSuccessful,
+				TxHash: txHash,
+			}, nil
+		},
+	}
 
 	m := NewMinter(MinterConfig{
-		ChainRPC:        srv.URL,
-		ContractAddress: "0xtest",
-	})
+		ChainID:         16602,
+		ContractAddress: "0x1234567890abcdef1234567890abcdef12345678",
+	}, backend, key)
 
-	err := m.UpdateMetadata(context.Background(), "token-1", EncryptedMeta{
+	err := m.UpdateMetadata(context.Background(), "1", EncryptedMeta{
 		Ciphertext: []byte("encrypted"),
 		Nonce:      []byte("nonce"),
 		KeyID:      "key-1",
@@ -172,27 +181,30 @@ func TestUpdateMetadata_Success(t *testing.T) {
 }
 
 func TestGetStatus_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(rpcResponse{
-			JSONRPC: "2.0",
-			Result:  json.RawMessage(`"0x0000000000000000000000001234"`),
-			ID:      1,
-		})
-	}))
-	defer srv.Close()
+	key, _ := testKey(t)
+	testAddr := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+
+	// ABI-encode an address return value
+	addrType, _ := abi.NewType("address", "", nil)
+	encoded, _ := abi.Arguments{{Type: addrType}}.Pack(testAddr)
+
+	backend := &zgtest.MockBackend{
+		CallFn: func(_ context.Context, _ ethereum.CallMsg) ([]byte, error) {
+			return encoded, nil
+		},
+	}
 
 	m := NewMinter(MinterConfig{
-		ChainRPC:        srv.URL,
 		ChainID:         16602,
 		ContractAddress: "0xcontract",
-	})
+	}, backend, key)
 
-	status, err := m.GetStatus(context.Background(), "token-1")
+	status, err := m.GetStatus(context.Background(), "1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if status.TokenID != "token-1" {
-		t.Errorf("expected token-1, got %s", status.TokenID)
+	if status.TokenID != "1" {
+		t.Errorf("expected token ID 1, got %s", status.TokenID)
 	}
 	if status.ChainID != 16602 {
 		t.Errorf("expected chain 16602, got %d", status.ChainID)
@@ -200,21 +212,24 @@ func TestGetStatus_Success(t *testing.T) {
 }
 
 func TestGetStatus_TokenNotFound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(rpcResponse{
-			JSONRPC: "2.0",
-			Result:  json.RawMessage(`"0x"`),
-			ID:      1,
-		})
-	}))
-	defer srv.Close()
+	key, _ := testKey(t)
+
+	// Return zero address = token not found
+	addrType, _ := abi.NewType("address", "", nil)
+	encoded, _ := abi.Arguments{{Type: addrType}}.Pack(common.Address{})
+
+	backend := &zgtest.MockBackend{
+		CallFn: func(_ context.Context, _ ethereum.CallMsg) ([]byte, error) {
+			return encoded, nil
+		},
+	}
 
 	m := NewMinter(MinterConfig{
-		ChainRPC:        srv.URL,
+		ChainID:         16602,
 		ContractAddress: "0xcontract",
-	})
+	}, backend, key)
 
-	_, err := m.GetStatus(context.Background(), "missing-token")
+	_, err := m.GetStatus(context.Background(), "999")
 	if err == nil {
 		t.Fatal("expected error for missing token")
 	}
