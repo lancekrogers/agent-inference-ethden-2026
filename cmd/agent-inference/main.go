@@ -11,6 +11,7 @@ import (
 
 	hiero "github.com/hiero-ledger/hiero-sdk-go/v2/sdk"
 
+	"github.com/lancekrogers/agent-coordinator-ethden-2026/pkg/daemon"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/agent"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/hcs"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog"
@@ -58,7 +59,11 @@ func main() {
 	transport := initHCSTransport(log)
 	handler := hcs.NewHandler(cfg.HCSHandler(transport))
 
-	a := agent.New(*cfg, log, comp, store, mint, aud, handler)
+	// Connect to daemon runtime (optional — agent works standalone if unavailable).
+	daemonClient := connectDaemon(log, cfg.DaemonAddr)
+	defer daemonClient.Close()
+
+	a := agent.New(*cfg, log, daemonClient, comp, store, mint, aud, handler)
 
 	log.Info("inference agent starting", "agent_id", cfg.AgentID)
 	if err := a.Run(ctx); err != nil && err != context.Canceled {
@@ -108,4 +113,16 @@ func (f *fallbackTransport) Publish(_ context.Context, topicID string, data []by
 
 func (f *fallbackTransport) Subscribe(_ context.Context, _ string) (<-chan []byte, <-chan error) {
 	return make(chan []byte), make(chan error)
+}
+
+func connectDaemon(log *slog.Logger, addr string) daemon.DaemonClient {
+	daemonCfg := daemon.DefaultConfig()
+	daemonCfg.Address = addr
+
+	client, err := daemon.NewGRPCClient(context.Background(), daemonCfg)
+	if err != nil {
+		log.Warn("daemon connection failed, running standalone", "error", err)
+		return daemon.Noop()
+	}
+	return client
 }

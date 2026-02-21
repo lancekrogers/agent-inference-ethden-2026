@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lancekrogers/agent-coordinator-ethden-2026/pkg/daemon"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/hcs"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/compute"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/da"
@@ -116,6 +117,7 @@ func TestProcessTask_Success(t *testing.T) {
 	a := New(
 		testConfig(),
 		testLogger(),
+		daemon.Noop(),
 		&mockCompute{jobID: "job-1", result: &compute.JobResult{
 			JobID: "job-1", Status: compute.JobStatusCompleted, Output: "hello",
 		}},
@@ -150,6 +152,7 @@ func TestProcessTask_ComputeFails(t *testing.T) {
 
 	a := New(
 		testConfig(), testLogger(),
+		daemon.Noop(),
 		&mockCompute{submitErr: errors.New("compute down")},
 		&mockStorage{}, &mockMinter{}, &mockAudit{}, handler,
 	)
@@ -168,6 +171,7 @@ func TestProcessTask_StorageFails(t *testing.T) {
 
 	a := New(
 		testConfig(), testLogger(),
+		daemon.Noop(),
 		&mockCompute{jobID: "j1", result: &compute.JobResult{
 			Status: compute.JobStatusCompleted, Output: "out",
 		}},
@@ -192,6 +196,7 @@ func TestProcessTask_ContextCancelled(t *testing.T) {
 
 	a := New(
 		testConfig(), testLogger(),
+		daemon.Noop(),
 		&mockCompute{submitErr: context.Canceled},
 		&mockStorage{}, &mockMinter{}, &mockAudit{}, handler,
 	)
@@ -213,6 +218,7 @@ func TestRun_ReceivesAndProcesses(t *testing.T) {
 
 	a := New(
 		testConfig(), testLogger(),
+		daemon.Noop(),
 		&mockCompute{jobID: "j1", result: &compute.JobResult{
 			Status: compute.JobStatusCompleted, Output: "out",
 		}},
@@ -257,6 +263,7 @@ func TestRun_GracefulShutdown(t *testing.T) {
 	})
 
 	a := New(testConfig(), testLogger(),
+		daemon.Noop(),
 		&mockCompute{}, &mockStorage{}, &mockMinter{}, &mockAudit{}, handler,
 	)
 
@@ -298,8 +305,8 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.AgentID != "test-123" {
 		t.Errorf("expected test-123, got %s", cfg.AgentID)
 	}
-	if cfg.DaemonAddr != "localhost:9090" {
-		t.Errorf("expected localhost:9090, got %s", cfg.DaemonAddr)
+	if cfg.DaemonAddr != "localhost:50051" {
+		t.Errorf("expected localhost:50051, got %s", cfg.DaemonAddr)
 	}
 	if cfg.HealthInterval != 30*time.Second {
 		t.Errorf("expected 30s, got %v", cfg.HealthInterval)

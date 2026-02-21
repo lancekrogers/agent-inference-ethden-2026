@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lancekrogers/agent-coordinator-ethden-2026/pkg/daemon"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/hcs"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/compute"
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/da"
@@ -38,12 +39,14 @@ import (
 type Agent struct {
 	cfg     Config
 	log     *slog.Logger
+	daemon  daemon.DaemonClient
 	compute compute.ComputeBroker
 	storage storage.StorageClient
 	minter  inft.INFTMinter
 	audit   da.AuditPublisher
 	handler *hcs.Handler
 
+	daemonReg      *daemon.RegisterResponse
 	startTime      time.Time
 	completedTasks atomic.Int64
 	failedTasks    atomic.Int64
@@ -53,6 +56,7 @@ type Agent struct {
 func New(
 	cfg Config,
 	log *slog.Logger,
+	dc daemon.DaemonClient,
 	comp compute.ComputeBroker,
 	store storage.StorageClient,
 	mint inft.INFTMinter,
@@ -62,6 +66,7 @@ func New(
 	return &Agent{
 		cfg:     cfg,
 		log:     log,
+		daemon:  dc,
 		compute: comp,
 		storage: store,
 		minter:  mint,
@@ -74,6 +79,20 @@ func New(
 func (a *Agent) Run(ctx context.Context) error {
 	a.startTime = time.Now()
 	a.log.Info("starting inference agent", "agent_id", a.cfg.AgentID)
+
+	// Register with daemon runtime (optional).
+	reg, regErr := a.daemon.Register(ctx, daemon.RegisterRequest{
+		AgentName:    a.cfg.AgentID,
+		AgentType:    "inference",
+		Capabilities: []string{"0g-compute", "0g-storage", "0g-inft", "0g-da"},
+	})
+	if regErr != nil {
+		a.log.Warn("daemon registration failed, running standalone", "error", regErr)
+		a.daemon = daemon.Noop()
+	} else {
+		a.daemonReg = reg
+		a.log.Info("registered with daemon", "agent_id", reg.AgentID, "session_id", reg.SessionID)
+	}
 
 	// Start HCS subscription in background
 	go func() {
@@ -214,6 +233,16 @@ func (a *Agent) healthLoop(ctx context.Context) {
 				CompletedTasks: int(a.completedTasks.Load()),
 				FailedTasks:    int(a.failedTasks.Load()),
 			})
+
+			// Daemon heartbeat on the same tick.
+			hbReq := daemon.HeartbeatRequest{Timestamp: time.Now()}
+			if a.daemonReg != nil {
+				hbReq.AgentID = a.daemonReg.AgentID
+				hbReq.SessionID = a.daemonReg.SessionID
+			}
+			if err := a.daemon.Heartbeat(ctx, hbReq); err != nil {
+				a.log.Warn("daemon heartbeat failed", "error", err)
+			}
 		}
 	}
 }

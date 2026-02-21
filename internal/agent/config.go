@@ -45,7 +45,7 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("config: INFERENCE_AGENT_ID is required")
 	}
 
-	cfg.DaemonAddr = envOr("INFERENCE_DAEMON_ADDR", "localhost:9090")
+	cfg.DaemonAddr = envOr("INFERENCE_DAEMON_ADDR", "localhost:50051")
 
 	healthStr := os.Getenv("INFERENCE_HEALTH_INTERVAL")
 	if healthStr == "" {
