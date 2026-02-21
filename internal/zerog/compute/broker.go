@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -29,14 +28,38 @@ import (
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog"
 )
 
+// servingABIJSON matches the 0G InferenceServing contract on Galileo testnet.
+// Reverse-engineered from on-chain response data at contract
+// 0xa79F4c8311FF93C06b8CfB403690cc987c93F91E (chain ID 16602).
+// The Service struct has 11 fields; field order must exactly match the contract.
 const servingABIJSON = `[
   {
-    "name": "getServiceCount",
+    "name": "getAllServices",
     "type": "function",
     "stateMutability": "view",
-    "inputs": [],
+    "inputs": [
+      {"name": "offset", "type": "uint256"},
+      {"name": "limit", "type": "uint256"}
+    ],
     "outputs": [
-      {"name": "", "type": "uint256"}
+      {
+        "name": "services",
+        "type": "tuple[]",
+        "components": [
+          {"name": "provider", "type": "address"},
+          {"name": "name", "type": "string"},
+          {"name": "url", "type": "string"},
+          {"name": "inputPrice", "type": "uint256"},
+          {"name": "outputPrice", "type": "uint256"},
+          {"name": "updatedAt", "type": "uint256"},
+          {"name": "model", "type": "string"},
+          {"name": "verifiability", "type": "string"},
+          {"name": "content", "type": "string"},
+          {"name": "signer", "type": "address"},
+          {"name": "occupied", "type": "bool"}
+        ]
+      },
+      {"name": "total", "type": "uint256"}
     ]
   },
   {
@@ -44,14 +67,26 @@ const servingABIJSON = `[
     "type": "function",
     "stateMutability": "view",
     "inputs": [
-      {"name": "index", "type": "uint256"}
+      {"name": "provider", "type": "address"}
     ],
     "outputs": [
-      {"name": "provider", "type": "address"},
-      {"name": "name", "type": "string"},
-      {"name": "serviceType", "type": "string"},
-      {"name": "url", "type": "string"},
-      {"name": "model", "type": "string"}
+      {
+        "name": "",
+        "type": "tuple",
+        "components": [
+          {"name": "provider", "type": "address"},
+          {"name": "name", "type": "string"},
+          {"name": "url", "type": "string"},
+          {"name": "inputPrice", "type": "uint256"},
+          {"name": "outputPrice", "type": "uint256"},
+          {"name": "updatedAt", "type": "uint256"},
+          {"name": "model", "type": "string"},
+          {"name": "verifiability", "type": "string"},
+          {"name": "content", "type": "string"},
+          {"name": "signer", "type": "address"},
+          {"name": "occupied", "type": "bool"}
+        ]
+      }
     ]
   }
 ]`
@@ -66,7 +101,12 @@ func mustParseABI(raw string) abi.ABI {
 	return parsed
 }
 
-const modelCacheDuration = 5 * time.Minute
+const (
+	modelCacheDuration = 5 * time.Minute
+	// servicesPageLimit is the maximum number of services the contract allows
+	// per getAllServices call. The contract reverts with limit > 50.
+	servicesPageLimit = 50
+)
 
 // ComputeBroker submits inference jobs to 0G decentralized GPU compute.
 type ComputeBroker interface {
@@ -138,7 +178,7 @@ func (b *broker) SubmitJob(ctx context.Context, req JobRequest) (string, error) 
 		return "", fmt.Errorf("compute: marshal request: %w", err)
 	}
 
-	endpoint := providerURL + "/v1/chat/completions"
+	endpoint := providerURL + "/v1/proxy/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("compute: create request: %w", err)
@@ -151,7 +191,8 @@ func (b *broker) SubmitJob(ctx context.Context, req JobRequest) (string, error) 
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	const maxResponseBytes = 1 << 20 // 1 MB
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return "", fmt.Errorf("compute: read response: %w", err)
 	}
@@ -243,48 +284,42 @@ func (b *broker) ListModels(ctx context.Context) ([]Model, error) {
 }
 
 func (b *broker) listFromChain(ctx context.Context) ([]Model, error) {
-	// Get service count
-	var countResult []interface{}
-	err := b.contract.Call(&bind.CallOpts{Context: ctx}, &countResult, "getServiceCount")
+	var result []interface{}
+	err := b.contract.Call(&bind.CallOpts{Context: ctx}, &result, "getAllServices", big.NewInt(0), big.NewInt(servicesPageLimit))
 	if err != nil {
-		return nil, fmt.Errorf("getServiceCount: %w", err)
+		return nil, fmt.Errorf("getAllServices: %w", err)
 	}
 
-	if len(countResult) == 0 {
+	if len(result) < 2 {
 		return nil, nil
 	}
 
-	count, ok := countResult[0].(*big.Int)
+	// result[0] is the services array, result[1] is the total count.
+	// Struct field order must match the contract's Service struct exactly.
+	services, ok := result[0].([]struct {
+		Provider      common.Address `json:"provider"`
+		Name          string         `json:"name"`
+		Url           string         `json:"url"`
+		InputPrice    *big.Int       `json:"inputPrice"`
+		OutputPrice   *big.Int       `json:"outputPrice"`
+		UpdatedAt     *big.Int       `json:"updatedAt"`
+		Model         string         `json:"model"`
+		Verifiability string         `json:"verifiability"`
+		Content       string         `json:"content"`
+		Signer        common.Address `json:"signer"`
+		Occupied      bool           `json:"occupied"`
+	})
 	if !ok {
-		return nil, fmt.Errorf("unexpected count type")
+		return nil, fmt.Errorf("unexpected services type: %T", result[0])
 	}
 
-	n := int(count.Int64())
-	models := make([]Model, 0, n)
-
-	for i := 0; i < n; i++ {
-		var svcResult []interface{}
-		err := b.contract.Call(&bind.CallOpts{Context: ctx}, &svcResult, "getService", big.NewInt(int64(i)))
-		if err != nil {
-			continue // skip unavailable services
-		}
-
-		if len(svcResult) < 5 {
-			continue
-		}
-
-		provider, _ := svcResult[0].(common.Address)
-		name, _ := svcResult[1].(string)
-		svcType, _ := svcResult[2].(string)
-		url, _ := svcResult[3].(string)
-		model, _ := svcResult[4].(string)
-
+	models := make([]Model, 0, len(services))
+	for _, svc := range services {
 		models = append(models, Model{
-			ID:          model,
-			Name:        name,
-			Provider:    provider.Hex(),
-			ServiceType: svcType,
-			URL:         url,
+			ID:       svc.Model,
+			Name:     svc.Name,
+			Provider: svc.Provider.Hex(),
+			URL:      svc.Url,
 		})
 	}
 
@@ -304,7 +339,8 @@ func (b *broker) listFromHTTP(ctx context.Context) ([]Model, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	const maxListBytes = 64 * 1024 // 64 KB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxListBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -396,5 +432,3 @@ func (b *broker) cacheModels(models []Model) {
 	b.modelsTTL = time.Now().Add(modelCacheDuration)
 }
 
-// Ensure ethereum import is used (needed for CallMsg in listFromChain).
-var _ = ethereum.CallMsg{}

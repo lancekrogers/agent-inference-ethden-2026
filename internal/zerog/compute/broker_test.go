@@ -32,25 +32,67 @@ func newTestBroker(t *testing.T, backend *zgtest.MockBackend, httpEndpoint strin
 	}, backend, key)
 }
 
-// encodedServiceCount returns ABI-encoded uint256 for getServiceCount.
-func encodedServiceCount(n int) []byte {
-	uint256Type, _ := abi.NewType("uint256", "", nil)
-	data, _ := abi.Arguments{{Type: uint256Type}}.Pack(big.NewInt(int64(n)))
-	return data
+type serviceTestData struct {
+	Provider common.Address
+	Name     string
+	URL      string
+	Model    string
 }
 
-// encodedService returns ABI-encoded outputs for getService.
-func encodedService(provider common.Address, name, svcType, url, model string) []byte {
-	addrType, _ := abi.NewType("address", "", nil)
-	strType, _ := abi.NewType("string", "", nil)
-	args := abi.Arguments{
-		{Type: addrType},
-		{Type: strType},
-		{Type: strType},
-		{Type: strType},
-		{Type: strType},
+// encodedAllServices returns ABI-encoded outputs for getAllServices.
+// Matches the 11-field Service struct from the 0G InferenceServing contract.
+func encodedAllServices(services []serviceTestData, total int) []byte {
+	tupleType, _ := abi.NewType("tuple[]", "", []abi.ArgumentMarshaling{
+		{Name: "provider", Type: "address"},
+		{Name: "name", Type: "string"},
+		{Name: "url", Type: "string"},
+		{Name: "inputPrice", Type: "uint256"},
+		{Name: "outputPrice", Type: "uint256"},
+		{Name: "updatedAt", Type: "uint256"},
+		{Name: "model", Type: "string"},
+		{Name: "verifiability", Type: "string"},
+		{Name: "content", Type: "string"},
+		{Name: "signer", Type: "address"},
+		{Name: "occupied", Type: "bool"},
+	})
+	uint256Type, _ := abi.NewType("uint256", "", nil)
+
+	type svcStruct struct {
+		Provider      common.Address
+		Name          string
+		Url           string
+		InputPrice    *big.Int
+		OutputPrice   *big.Int
+		UpdatedAt     *big.Int
+		Model         string
+		Verifiability string
+		Content       string
+		Signer        common.Address
+		Occupied      bool
 	}
-	data, _ := args.Pack(provider, name, svcType, url, model)
+
+	svcs := make([]svcStruct, len(services))
+	for i, s := range services {
+		svcs[i] = svcStruct{
+			Provider:      s.Provider,
+			Name:          s.Name,
+			Url:           s.URL,
+			InputPrice:    big.NewInt(0),
+			OutputPrice:   big.NewInt(0),
+			UpdatedAt:     big.NewInt(0),
+			Model:         s.Model,
+			Verifiability: "none",
+			Content:       "",
+			Signer:        common.Address{},
+			Occupied:      true,
+		}
+	}
+
+	args := abi.Arguments{
+		{Type: tupleType},
+		{Type: uint256Type},
+	}
+	data, _ := args.Pack(svcs, big.NewInt(int64(total)))
 	return data
 }
 
@@ -58,7 +100,7 @@ func TestSubmitJob_Success(t *testing.T) {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/chat/completions":
+		case "/v1/proxy/chat/completions":
 			var req chatRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("failed to decode request: %v", err)
@@ -234,17 +276,12 @@ func TestGetResult_Timeout(t *testing.T) {
 func TestListModels_FromChain(t *testing.T) {
 	provider := common.HexToAddress("0xabc")
 
-	callCount := 0
 	backend := &zgtest.MockBackend{
 		CallFn: func(_ context.Context, call ethereum.CallMsg) ([]byte, error) {
-			callCount++
-			if callCount == 1 {
-				return encodedServiceCount(2), nil
-			}
-			if callCount == 2 {
-				return encodedService(provider, "Qwen 2.5", "chatbot", "https://p1.example.com", "qwen-2.5-7b"), nil
-			}
-			return encodedService(common.HexToAddress("0xdef"), "GPT-OSS", "chatbot", "https://p2.example.com", "gpt-oss-20b"), nil
+			return encodedAllServices([]serviceTestData{
+				{Provider: provider, Name: "Qwen 2.5", URL: "https://p1.example.com", Model: "qwen-2.5-7b"},
+				{Provider: common.HexToAddress("0xdef"), Name: "GPT-OSS", URL: "https://p2.example.com", Model: "gpt-oss-20b"},
+			}, 2), nil
 		},
 	}
 
@@ -314,7 +351,7 @@ func TestListModels_FallbackHTTP(t *testing.T) {
 func TestListModels_Empty(t *testing.T) {
 	backend := &zgtest.MockBackend{
 		CallFn: func(_ context.Context, _ ethereum.CallMsg) ([]byte, error) {
-			return encodedServiceCount(0), nil
+			return encodedAllServices(nil, 0), nil
 		},
 	}
 
@@ -335,10 +372,9 @@ func TestListModels_Cached(t *testing.T) {
 	backend := &zgtest.MockBackend{
 		CallFn: func(_ context.Context, _ ethereum.CallMsg) ([]byte, error) {
 			callCount++
-			if callCount == 1 {
-				return encodedServiceCount(1), nil
-			}
-			return encodedService(common.HexToAddress("0xabc"), "Model1", "chatbot", "https://p.example.com", "m1"), nil
+			return encodedAllServices([]serviceTestData{
+				{Provider: common.HexToAddress("0xabc"), Name: "Model1", URL: "https://p.example.com", Model: "m1"},
+			}, 1), nil
 		},
 	}
 
