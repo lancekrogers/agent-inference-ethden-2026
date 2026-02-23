@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +25,8 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog"
 )
@@ -185,9 +188,18 @@ func (b *broker) SubmitJob(ctx context.Context, req JobRequest) (string, error) 
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := b.client.Do(httpReq)
+	// Attach signed Bearer token for 0G session auth.
+	if b.key != nil {
+		token, tokenErr := b.buildAuthToken()
+		if tokenErr != nil {
+			return "", fmt.Errorf("compute: build auth token: %w", tokenErr)
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := b.doWithAuthRetry(ctx, httpReq, body)
 	if err != nil {
-		return "", fmt.Errorf("compute: provider request failed: %w", ErrBrokerDown)
+		return "", err
 	}
 	defer resp.Body.Close()
 
@@ -226,6 +238,57 @@ func (b *broker) SubmitJob(ctx context.Context, req JobRequest) (string, error) 
 	b.results.Store(chatResp.ID, result)
 
 	return chatResp.ID, nil
+}
+
+// buildAuthToken constructs a signed Bearer token for 0G Compute session auth.
+// Format: app-sk-<base64(timestamp:0xSignatureHex)>
+func (b *broker) buildAuthToken() (string, error) {
+	msg := fmt.Sprintf("%d", time.Now().Unix())
+	msgHash := crypto.Keccak256Hash([]byte(msg))
+
+	sig, err := crypto.Sign(msgHash.Bytes(), b.key)
+	if err != nil {
+		return "", fmt.Errorf("sign auth message: %w", err)
+	}
+
+	payload := fmt.Sprintf("%s:%s", msg, hexutil.Encode(sig))
+	token := "app-sk-" + base64.StdEncoding.EncodeToString([]byte(payload))
+	return token, nil
+}
+
+// doWithAuthRetry executes the HTTP request and retries once on 401
+// with a fresh auth token.
+func (b *broker) doWithAuthRetry(ctx context.Context, req *http.Request, body []byte) (*http.Response, error) {
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("compute: provider request failed: %w", ErrBrokerDown)
+	}
+
+	if resp.StatusCode != http.StatusUnauthorized || b.key == nil {
+		return resp, nil
+	}
+
+	// 401 — refresh token and retry once.
+	resp.Body.Close()
+
+	token, tokenErr := b.buildAuthToken()
+	if tokenErr != nil {
+		return nil, fmt.Errorf("compute: refresh auth token: %w", tokenErr)
+	}
+
+	retryReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("compute: create retry request: %w", err)
+	}
+	retryReq.Header.Set("Content-Type", "application/json")
+	retryReq.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err = b.client.Do(retryReq)
+	if err != nil {
+		return nil, fmt.Errorf("compute: retry request failed: %w", ErrBrokerDown)
+	}
+
+	return resp, nil
 }
 
 func (b *broker) GetResult(ctx context.Context, jobID string) (*JobResult, error) {

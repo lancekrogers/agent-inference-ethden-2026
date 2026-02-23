@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -403,6 +404,96 @@ func TestListModels_Cached(t *testing.T) {
 	}
 	if callCount != prevCount {
 		t.Errorf("expected cached result (no new calls), got %d additional calls", callCount-prevCount)
+	}
+}
+
+func TestSubmitJob_AuthHeader(t *testing.T) {
+	var gotAuth string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/proxy/chat/completions":
+			gotAuth = r.Header.Get("Authorization")
+			resp := chatResponse{
+				ID:      "job-auth",
+				Choices: []chatChoice{{Message: chatMessage{Role: "assistant", Content: "ok"}}},
+				Model:   "test-model",
+			}
+			json.NewEncoder(w).Encode(resp)
+		case "/api/services/list":
+			type svcEntry struct {
+				Provider    string `json:"providerAddress"`
+				Name        string `json:"name"`
+				ServiceType string `json:"serviceType"`
+				URL         string `json:"url"`
+				Model       string `json:"model"`
+			}
+			json.NewEncoder(w).Encode([]svcEntry{
+				{Provider: "0xabc", Name: "Test", URL: srv.URL, Model: "test-model"},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	backend := &zgtest.MockBackend{}
+	b := newTestBroker(t, backend, srv.URL)
+
+	_, err := b.SubmitJob(context.Background(), JobRequest{ModelID: "test-model", Input: "hi"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth == "" {
+		t.Fatal("expected Authorization header to be set")
+	}
+	if !strings.HasPrefix(gotAuth, "Bearer app-sk-") {
+		t.Errorf("unexpected auth format: %s", gotAuth)
+	}
+}
+
+func TestSubmitJob_RetryOn401(t *testing.T) {
+	calls := 0
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/proxy/chat/completions":
+			calls++
+			if calls == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			resp := chatResponse{
+				ID:      "job-retry",
+				Choices: []chatChoice{{Message: chatMessage{Role: "assistant", Content: "ok"}}},
+				Model:   "test-model",
+			}
+			json.NewEncoder(w).Encode(resp)
+		case "/api/services/list":
+			type svcEntry struct {
+				Provider    string `json:"providerAddress"`
+				Name        string `json:"name"`
+				ServiceType string `json:"serviceType"`
+				URL         string `json:"url"`
+				Model       string `json:"model"`
+			}
+			json.NewEncoder(w).Encode([]svcEntry{
+				{Provider: "0xabc", Name: "Test", URL: srv.URL, Model: "test-model"},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	backend := &zgtest.MockBackend{}
+	b := newTestBroker(t, backend, srv.URL)
+
+	jobID, err := b.SubmitJob(context.Background(), JobRequest{ModelID: "test-model", Input: "hi"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if jobID != "job-retry" {
+		t.Errorf("expected job-retry, got %s", jobID)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 HTTP calls (initial + retry), got %d", calls)
 	}
 }
 
