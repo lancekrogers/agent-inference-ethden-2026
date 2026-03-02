@@ -188,8 +188,9 @@ func (a *Agent) processTask(ctx context.Context, task hcs.TaskAssignment) error 
 		Timestamp:  time.Now(),
 	})
 
-	// 7. Report result back via HCS
+	// 7. Report result back via HCS (includes CRE signal fields)
 	duration := time.Since(start)
+	confidence, riskScore := a.deriveSignalMetrics(result)
 	err = a.handler.PublishResult(ctx, hcs.TaskResult{
 		TaskID:            task.TaskID,
 		Status:            "completed",
@@ -199,6 +200,8 @@ func (a *Agent) processTask(ctx context.Context, task hcs.TaskAssignment) error 
 		StorageContentID:  contentID,
 		INFTTokenID:       tokenID,
 		AuditSubmissionID: auditID,
+		SignalConfidence:  confidence,
+		RiskScore:         riskScore,
 	})
 	if err != nil {
 		return fmt.Errorf("agent: result publish failed for task %s: %w", task.TaskID, err)
@@ -207,6 +210,32 @@ func (a *Agent) processTask(ctx context.Context, task hcs.TaskAssignment) error 
 	a.completedTasks.Add(1)
 	a.log.Info("task completed", "task_id", task.TaskID, "duration", duration)
 	return nil
+}
+
+// deriveSignalMetrics extracts CRE-compatible signal confidence and risk score
+// from the inference result. Confidence is based on output length and token usage
+// (longer, higher-token outputs indicate more substantive analysis). Risk score
+// is derived inversely: higher confidence = lower risk.
+func (a *Agent) deriveSignalMetrics(result *compute.JobResult) (confidence float64, riskScore int) {
+	// Base confidence from token utilization (more tokens = more thorough analysis).
+	if result.TokensUsed > 0 {
+		confidence = float64(result.TokensUsed) / 1000.0
+		if confidence > 1.0 {
+			confidence = 1.0
+		}
+		if confidence < 0.3 {
+			confidence = 0.3
+		}
+	} else {
+		confidence = 0.5 // default when token count unavailable
+	}
+
+	// Risk score: inverse of confidence, scaled 0-100.
+	riskScore = int((1.0 - confidence) * 100)
+	if riskScore < 0 {
+		riskScore = 0
+	}
+	return confidence, riskScore
 }
 
 func (a *Agent) reportFailure(ctx context.Context, task hcs.TaskAssignment, taskErr error) {
