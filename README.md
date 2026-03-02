@@ -61,9 +61,20 @@ Each task flows through seven sequential stages:
 | 4. Store | 0G Storage + Flow | SHA-256 data root anchored on-chain, blob uploaded to storage node |
 | 5. Mint | 0G Chain (ERC-7857) | AES-256-GCM encrypted metadata, provenance NFT minted |
 | 6. Audit | 0G DA | Full event JSON submitted to DA Entrance contract |
-| 7. Report | Hedera HCS | Publish `task_result` with output, storage ref, iNFT ID, DA ref |
+| 7. Report | Hedera HCS | Publish `task_result` with output, storage ref, iNFT ID, DA ref, signal confidence, risk score |
 
 Any stage failure marks the task as failed and publishes a `task_result` with `status: "failed"` back to the coordinator.
+
+### CRE Risk Router Integration
+
+Task results include structured fields consumed by the [CRE Risk Router](../cre-risk-router/):
+
+| Field | Type | Range | Purpose |
+|-------|------|-------|---------|
+| `signal_confidence` | float64 | 0.0-1.0 | Confidence in the inference signal; feeds CRE Gate 1 |
+| `risk_score` | int | 0-100 | Risk assessment of the trade; feeds CRE Gate 2 |
+
+These fields enable the coordinator to forward risk context to the CRE Risk Router for pre-trade evaluation before dispatching to the DeFi agent.
 
 ## 0G Integration Details
 
