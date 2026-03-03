@@ -1,5 +1,10 @@
 # agent-inference
 
+[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![0G](https://img.shields.io/badge/0G-Galileo%20Testnet-00D4AA)](https://0g.ai)
+[![Hedera](https://img.shields.io/badge/Hedera-HCS-8259EF?logo=hedera)](https://hedera.com)
+[![ERC-7857](https://img.shields.io/badge/ERC--7857-iNFT-3C3C3D?logo=ethereum)](https://eips.ethereum.org)
+
 Decentralized AI inference agent built on the [0G](https://0g.ai) compute ecosystem.
 
 Part of the [ETHDenver 2026 Agent Economy](../README.md) submission.
@@ -7,6 +12,8 @@ Part of the [ETHDenver 2026 Agent Economy](../README.md) submission.
 ## Overview
 
 The inference agent routes AI workloads through a full decentralized pipeline: receives task assignments from the coordinator via Hedera Consensus Service (HCS), discovers GPU providers on-chain from the 0G InferenceServing contract, dispatches inference via OpenAI-compatible REST, persists results to 0G Storage with on-chain anchoring, mints encrypted ERC-7857 iNFTs for provenance, and publishes an immutable audit trail to 0G Data Availability (DA).
+
+> **TL;DR** — Receives tasks via Hedera HCS, discovers GPU providers from the 0G on-chain serving contract, runs inference, persists results to 0G Storage, mints ERC-7857 iNFTs for provenance, and publishes an audit trail to 0G DA. No centralized API keys.
 
 No centralized API keys. No single-provider lock-in. The agent dynamically discovers available GPU providers from the 0G serving contract and routes jobs to the best available endpoint.
 
@@ -61,9 +68,20 @@ Each task flows through seven sequential stages:
 | 4. Store | 0G Storage + Flow | SHA-256 data root anchored on-chain, blob uploaded to storage node |
 | 5. Mint | 0G Chain (ERC-7857) | AES-256-GCM encrypted metadata, provenance NFT minted |
 | 6. Audit | 0G DA | Full event JSON submitted to DA Entrance contract |
-| 7. Report | Hedera HCS | Publish `task_result` with output, storage ref, iNFT ID, DA ref |
+| 7. Report | Hedera HCS | Publish `task_result` with output, storage ref, iNFT ID, DA ref, signal confidence, risk score |
 
 Any stage failure marks the task as failed and publishes a `task_result` with `status: "failed"` back to the coordinator.
+
+### CRE Risk Router Integration
+
+Task results include structured fields consumed by the [CRE Risk Router](../cre-risk-router/):
+
+| Field | Type | Range | Purpose |
+|-------|------|-------|---------|
+| `signal_confidence` | float64 | 0.0-1.0 | Confidence in the inference signal; feeds CRE Gate 1 |
+| `risk_score` | int | 0-100 | Risk assessment of the trade; feeds CRE Gate 2 |
+
+These fields enable the coordinator to forward risk context to the CRE Risk Router for pre-trade evaluation before dispatching to the DeFi agent.
 
 ## 0G Integration Details
 
@@ -161,17 +179,19 @@ just run
 ## Project Structure
 
 ```
-cmd/agent-inference/       Entry point, dependency wiring
-internal/
-  agent/                   Agent lifecycle, config, pipeline orchestration
-  hcs/                     HCS publish/subscribe transport (Hiero SDK)
-  zerog/
-    compute/               0G Compute broker (on-chain discovery + OpenAI REST)
-    storage/               0G Storage client (Flow contract + node upload)
-    inft/                  ERC-7857 iNFT minter (AES-256-GCM encrypted metadata)
-    da/                    0G Data Availability publisher (DA Entrance contract)
-    chain.go               Shared chain client, key loading, transact opts
-    zgtest/                Mock backends for unit tests
+agent-inference/
+├── cmd/
+│   └── agent-inference/       # Entry point, dependency wiring
+├── internal/
+│   ├── agent/                 # Agent lifecycle, config, pipeline orchestration
+│   ├── hcs/                   # HCS publish/subscribe transport (Hiero SDK)
+│   └── zerog/
+│       ├── compute/           # 0G Compute broker (on-chain discovery + OpenAI REST)
+│       ├── storage/           # 0G Storage client (Flow contract + node upload)
+│       ├── inft/              # ERC-7857 iNFT minter (AES-256-GCM encrypted metadata)
+│       ├── da/                # 0G Data Availability publisher (DA Entrance contract)
+│       ├── chain.go           # Shared chain client, key loading, transact opts
+│       └── zgtest/            # Mock backends for unit tests
 ```
 
 ## Development
