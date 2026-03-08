@@ -7,7 +7,7 @@
 
 Decentralized AI inference agent built on the [0G](https://0g.ai) compute ecosystem.
 
-Part of the [ETHDenver 2026 Agent Economy](../README.md) submission.
+Part of the [Obey Agent Economy](https://github.com/lancekrogers/Obey-Agent-Economy) project.
 
 ## Overview
 
