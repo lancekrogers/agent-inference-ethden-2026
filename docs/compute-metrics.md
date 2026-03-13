@@ -167,7 +167,7 @@ go test -tags live -run TestLive_SubmitJob -v ./internal/zerog/compute/
 1. **Session auth not benchmarked**: Full inference latency requires establishing an on-chain session with a provider, which was not completed during testing
 2. **Testnet variability**: Gas costs and block times vary on testnet vs mainnet
 3. **Storage node uploads**: Raw blob upload latency depends on storage node availability and location
-4. **iNFT contract**: Not yet deployed on Galileo; minting metrics are estimates from gas simulation
+4. **Historical snapshot**: This report was captured before the current Galileo deployment evidence was collected. `AgentINFT` has since been deployed on Galileo at `0x17F41075454cf268D0672dd24EFBeA29EF2Dc05b`, but mint runtime metrics are still estimates until a public mint tx is documented.
 
 ## Analysis
 

@@ -11,11 +11,11 @@ Part of the [Obey Agent Economy](https://github.com/lancekrogers/Obey-Agent-Econ
 
 ## Overview
 
-The inference agent routes AI workloads through a full decentralized pipeline: receives task assignments from the coordinator via Hedera Consensus Service (HCS), discovers GPU providers on-chain from the 0G InferenceServing contract, dispatches inference via OpenAI-compatible REST, persists results to 0G Storage with on-chain anchoring, mints encrypted ERC-7857 iNFTs for provenance, and publishes an immutable audit trail to 0G Data Availability (DA).
+The inference agent implements a decentralized pipeline for AI workloads: receives task assignments from the coordinator via Hedera Consensus Service (HCS), discovers GPU providers on-chain from the 0G InferenceServing contract, dispatches inference via OpenAI-compatible REST, persists results to 0G Storage with on-chain anchoring, mints encrypted ERC-7857 iNFTs for provenance, and publishes an immutable audit trail to 0G Data Availability (DA).
 
-> **TL;DR** — Receives tasks via Hedera HCS, discovers GPU providers from the 0G on-chain serving contract, runs inference, persists results to 0G Storage, mints ERC-7857 iNFTs for provenance, and publishes an audit trail to 0G DA. No centralized API keys.
+> **TL;DR** — Receives tasks via Hedera HCS, discovers GPU providers from the 0G on-chain serving contract, runs inference, persists results to 0G Storage, mints ERC-7857 iNFTs for provenance, and publishes an audit trail to 0G DA. Current public evidence covers provider discovery and Galileo deployments; authenticated inference execution remains the main runtime proof gap.
 
-No centralized API keys. No single-provider lock-in. The agent dynamically discovers available GPU providers from the 0G serving contract and routes jobs to the best available endpoint.
+No centralized API keys. No single-provider lock-in. The agent dynamically discovers available GPU providers from the 0G serving contract and routes jobs to the best available endpoint. Galileo contract deployments are now documented publicly; runtime storage, DA, mint, and authenticated inference evidence are still being expanded.
 
 ## Built with Obedience Corp
 
@@ -34,7 +34,7 @@ graph TD
         SERVING["InferenceServing Contract<br/><i>0xa79F...91E</i><br/>provider discovery"]
         FLOW["Flow Contract<br/><i>0x22E0...296</i><br/>storage anchoring"]
         DA_CONTRACT["DA Entrance Contract<br/><i>0xE75A...57B</i><br/>audit trail"]
-        INFT_CONTRACT["ERC-7857 Contract<br/><i>iNFT minting</i>"]
+        INFT_CONTRACT["ERC-7857 Contract<br/><i>0x17F4...05b</i><br/>iNFT minting"]
     end
 
     subgraph "0G Provider Network"
