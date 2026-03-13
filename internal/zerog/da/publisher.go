@@ -18,7 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog"
+	"github.com/lancekrogers/agent-inference/internal/zerog"
 )
 
 const daABIJSON = `[

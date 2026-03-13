@@ -19,7 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog"
+	"github.com/lancekrogers/agent-inference/internal/zerog"
 )
 
 const contractABIJSON = `[

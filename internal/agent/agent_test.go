@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/lancekrogers/agent-coordinator-ethden-2026/pkg/daemon"
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/hcs"
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/compute"
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/da"
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/inft"
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/storage"
+	"github.com/lancekrogers/agent-inference/internal/hcs"
+	"github.com/lancekrogers/agent-inference/internal/zerog/compute"
+	"github.com/lancekrogers/agent-inference/internal/zerog/da"
+	"github.com/lancekrogers/agent-inference/internal/zerog/inft"
+	"github.com/lancekrogers/agent-inference/internal/zerog/storage"
 )
 
 // Mock implementations for testing

@@ -15,7 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/zgtest"
+	"github.com/lancekrogers/agent-inference/internal/zerog/zgtest"
 )
 
 func newTestBroker(t *testing.T, backend *zgtest.MockBackend, httpEndpoint string) ComputeBroker {

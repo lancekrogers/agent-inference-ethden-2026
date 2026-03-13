@@ -25,7 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog"
+	"github.com/lancekrogers/agent-inference/internal/zerog"
 )
 
 // servingABIJSON matches the 0G InferenceServing contract on Galileo testnet.

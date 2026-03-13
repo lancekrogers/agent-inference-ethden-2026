@@ -13,7 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/lancekrogers/agent-inference-ethden-2026/internal/zerog/zgtest"
+	"github.com/lancekrogers/agent-inference/internal/zerog/zgtest"
 )
 
 func testKey(t *testing.T) (*ecdsa.PrivateKey, []byte) {
